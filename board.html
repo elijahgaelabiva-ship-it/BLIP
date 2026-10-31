@@ -92,6 +92,25 @@ const ROOM = 'blip-room-1';
 firebase.initializeApp(firebaseConfig);
 const gameRef = firebase.database().ref('games/' + ROOM);
 
+// ---- presence: lets BLIP know this board page is open and connected ----
+// Written beside (not inside) the game node, because starting a new game replaces the whole game node.
+(function () {
+  try {
+    const db = firebase.database();
+    const presRef = db.ref('games/' + ROOM + '-presence');
+    const beat = () => { if (!document.hidden) presRef.set({ ts: firebase.database.ServerValue.TIMESTAMP }).catch(() => {}); };
+    db.ref('.info/connected').on('value', (s) => {
+      if (s.val() === true) {
+        presRef.onDisconnect().remove().catch(() => {});   // the server clears it if this page closes or loses signal
+        beat();
+      }
+    });
+    setInterval(beat, 15000);
+    document.addEventListener('visibilitychange', beat);
+    addEventListener('pagehide', () => { try { presRef.remove(); } catch (e) {} });
+  } catch (e) { /* presence is optional; the game still works without it */ }
+})();
+
 const statusEl = document.getElementById('status');
 const pickerEl = document.getElementById('picker');
 const boardWrapEl = document.getElementById('board-wrap');

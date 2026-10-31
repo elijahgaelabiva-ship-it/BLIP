@@ -11,6 +11,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
+<!-- PWA: manifest, icons, install support -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="48x48" href="/icons/icon-48.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="BLIP">
 <!-- Makes BLIP launch chrome-free (no status/address bar) when added to
      the home screen — this only takes effect from that home-screen icon,
      not from a normal browser tab. See the Fullscreen Mode script below
@@ -5876,7 +5882,55 @@ body.theme-live #blip-face .eyes { visibility: hidden; }
     }
   }
 
+  // ---- quality gates: stop random words from being saved as memories ----
+  var STOP = /^(?:a|an|the|so|very|not|just|really|too|also|still|now|here|there|back|home|done|ready|sure|sorry|fine|good|great|okay|ok|bad|sad|happy|angry|mad|tired|sleepy|hungry|thirsty|bored|scared|afraid|sick|cold|hot|late|early|busy|free|alone|lonely|excited|nervous|worried|upset|hurt|lost|stuck|going|coming|gonna|about|trying|doing|looking|waiting|talking|playing|eating|watching|feeling|thinking|sleeping|with|from|in|on|at|to|for|of|your|my|his|her|their|new|old|only|always|never|yes|no|yeah|hi|hello|hey|blip|confused|curious|glad|proud|cute|silly|funny|kind|nice|well|better|worse|na|po|ako|ikaw|siya|gutom|antok|pagod|malungkot|masaya|galit|takot|busog|he|she|it|we|they|you|me|who|what|when|why|how|that|this|them|us|um|uh|hmm)$/i;
+  var BAD_START = /^(?:me|you|us|it|its|this|that|these|those|what|when|where|why|how|who|if|to|and|or|but|so|because|do|did|does|can|could|will|would|am|are|is|was|were|have to|had to|need|want|think|feel|know|guess|mean|like|love|hate|um|uh|hmm|na|po)\b/i;
+  function wordCount(t) { return (String(t).trim().match(/[A-Za-z\u00C0-\u024F']+/g) || []).length; }
+  function goodName(n) {
+    n = String(n || '').trim();
+    if (!/^[A-Za-z][A-Za-z'-]{1,19}$/.test(n)) return false;
+    if (STOP.test(n)) return false;
+    if (n.length > 4 && /(?:ing|ed)$/i.test(n)) return false;
+    return true;
+  }
+  function goodFact(t) {
+    t = String(t || '').trim();
+    return t.length >= 6 && t.length <= 140 && wordCount(t) >= 2 && !BAD_START.test(t) && /[A-Za-z]{3}/.test(t);
+  }
+  function goodFood(t) {
+    t = String(t || '').trim();
+    var w = wordCount(t);
+    return t.length >= 3 && t.length <= 60 && w >= 1 && w <= 7 && !BAD_START.test(t) && !STOP.test(t) &&
+      !/\b(?:headache|fever|cough|stomachache|toothache|pain|nightmare|problem|accident|idea|dream|fun|time)\b/i.test(t);
+  }
+  function goodEvent(t) {
+    t = String(t || '').trim();
+    var w = wordCount(t);
+    return t.length >= 6 && t.length <= 90 && w >= 2 && !BAD_START.test(t);
+  }
+
   var mem = load();
+
+  // Clean out junk that earlier versions saved (e.g. a "name" like Hungry).
+  (function cleanse() {
+    try {
+      if (!Array.isArray(mem.facts)) mem.facts = [];
+      if (!mem.daily || typeof mem.daily !== 'object') mem.daily = {};
+      var before = JSON.stringify(mem);
+      if (mem.name && !goodName(mem.name)) mem.name = null;
+      mem.facts = mem.facts.filter(goodFact);
+      Object.keys(mem.daily).forEach(function (k) {
+        var d = mem.daily[k] || {};
+        d.food = (d.food || []).filter(goodFood);
+        d.events = (d.events || []).filter(goodEvent);
+        mem.daily[k] = d;
+      });
+      if (JSON.stringify(mem) !== before) save();
+    } catch (e) { console.warn('BLIP growing memory: cleanup skipped', e); }
+  })();
+
+  // Ask the browser not to evict BLIP's saved memories when the phone is low on space.
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
 
   function save() {
     try {
@@ -5909,21 +5963,21 @@ body.theme-live #blip-face .eyes { visibility: hidden; }
   // ---- public writers ----
   function rememberName(name) {
     name = (name || '').trim();
-    if (!name) return;
+    if (!goodName(name)) return;
     mem.name = name.charAt(0).toUpperCase() + name.slice(1);
     save();
   }
 
   function addFact(fact) {
     fact = (fact || '').trim();
-    if (!fact) return;
+    if (!goodFact(fact)) return;
     mem.facts = dedupePush(mem.facts, fact, MAX_FACTS);
     save();
   }
 
   function logFood(item, dateKey) {
     item = (item || '').trim();
-    if (!item) return;
+    if (!goodFood(item)) return;
     var day = ensureDay(dateKey || todayKey());
     day.food = dedupePush(day.food, item, 12);
     pruneDays();
@@ -5932,7 +5986,7 @@ body.theme-live #blip-face .eyes { visibility: hidden; }
 
   function logEvent(text, dateKey) {
     text = (text || '').trim();
-    if (!text) return;
+    if (!goodEvent(text)) return;
     var day = ensureDay(dateKey || todayKey());
     day.events = dedupePush(day.events, text, 12);
     pruneDays();
@@ -5942,34 +5996,94 @@ body.theme-live #blip-face .eyes { visibility: hidden; }
   function forget() {
     mem = blank();
     save();
+    try { localStorage.removeItem('blip_favorites_v1'); } catch (e) {}
   }
 
   function getAll() {
     return JSON.parse(JSON.stringify(mem));
   }
 
-  // ---- lightweight extraction from natural typed/spoken text ----
-  var NAME_RE = /\b(?:my name is|i'?m|call me)\s+([a-z][a-z'-]{1,19})\b/i;
-  var FOOD_RE = /\b(?:i (?:ate|had)|for (?:breakfast|lunch|dinner)[, ]*i (?:had|ate))\s+(.{2,60}?)(?:\s+(?:today|this morning|tonight|for breakfast|for lunch|for dinner))?\s*$/i;
-  var EVENT_RE = /\b(?:today i|today we|i (?:went|have|had)|we (?:went|had))\s+(.{2,80}?)\s*$/i;
-  var REMEMBER_RE = /\bremember (?:that )?(.{3,120})/i;
+  // ---- extraction from spoken / typed text (strict on purpose: better to miss than to save junk) ----
+  var NAME_STRONG = /\b(?:my name is|my name's|call me|ako si|ako po si|ang pangalan ko ay|pangalan ko ay|name ko ay|name ko is)\s+([A-Za-z][A-Za-z'-]{1,19})\b/i;
+  var NAME_WEAK = /^(?:(?:hi|hello|hey)[ ,!]*)?[Ii](?:'m| am|m)\s+([A-Z][A-Za-z'-]{1,19})$/i;
+  var FOOD_RES = [
+    /\bfor (?:breakfast|lunch|dinner|merienda|snack)[, ]*(?:i |we )?(?:had|ate|have)\s+(.{2,50}?)\s*$/i,
+    /\bi (?:just |already )?ate\s+(.{2,50}?)\s*$/i,
+    /\bi(?:'m| am) (?:eating|having)\s+(.{2,50}?)\s*$/i,
+    /\bkumain (?:ako|kami) ng\s+(.{2,50}?)\s*$/i,
+    /\bnag(?:breakfast|lunch|dinner|merienda) (?:ako|kami) ng\s+(.{2,50}?)\s*$/i
+  ];
+  var EVENT_RES = [
+    /\b(?:today|this morning|this afternoon|tonight|kanina|kahapon)[, ]+(?:i|we) (.{4,80}?)\s*$/i,
+    /\b(?:i|we) ((?:went|visited|played|watched|finished|passed|won|learned|saw|joined|started)\s+.{2,70}?)\s*$/i
+  ];
+  var REMEMBER_RES = [
+    /\bremember (?:that |this[:,]? )?(.{3,120})/i,
+    /\btandaan mo (?:na )?(.{3,120})/i
+  ];
+  var FAV_RE = /\bmy favou?rite (colou?r|animal|food|toy|cartoon|show|song|game|subject) (?:is|are)\s+(.{2,40}?)\s*$/i;
+  var FAV_TL = /\bpaborito ko(?:ng)? (kulay|hayop|pagkain|laruan|cartoon|kanta)(?: ay| ko ay)?\s+(.{2,40}?)\s*$/i;
+  var FAV_KEY = { color: 'color', colour: 'color', kulay: 'color', animal: 'animal', hayop: 'animal', food: 'food', pagkain: 'food',
+                  toy: 'toy', laruan: 'toy', cartoon: 'cartoon', show: 'cartoon', song: 'song', kanta: 'song' };
+  var BDAY_RE = /\b(?:my birthday is(?: on)?|ang birthday ko ay|birthday ko ay)\s+(.{3,30}?)\s*$/i;
+  var BFF_RE = /\bmy best friend(?:'s name)? is\s+([A-Za-z][A-Za-z'-]{1,19})\b/i;
+  var PET_RE = /\bi have (?:a|an) (dog|cat|bird|fish|hamster|rabbit|turtle)(?:,? (?:named|called) ([A-Z][a-z]{1,15}))?/;
+
+  function setFav(key, val) {
+    val = String(val || '').trim();
+    if (!val || val.length > 40) return false;
+    try { if (window.BLIP && window.BLIP.setFavorite) { window.BLIP.setFavorite(key, val); return true; } } catch (e) {}
+    return false;
+  }
 
   function learnFromText(text) {
     if (!text || typeof text !== 'string') return;
     var sentences = text.split(/[.!?]+\s*/).filter(Boolean);
     sentences.forEach(function (s) {
-      var m;
-      if ((m = s.match(NAME_RE))) rememberName(m[1]);
-      if ((m = s.match(REMEMBER_RE))) addFact(m[1].trim());
-      if ((m = s.match(FOOD_RE))) logFood(m[1].trim());
-      if ((m = s.match(EVENT_RE))) logEvent(m[1].trim());
+      s = s.trim();
+      var m, i;
+      if ((m = s.match(NAME_STRONG)) && goodName(m[1])) { rememberName(m[1]); setFav('name', m[1].charAt(0).toUpperCase() + m[1].slice(1)); }
+      else if ((m = s.match(NAME_WEAK)) && /^[A-Z]/.test(m[1]) && goodName(m[1])) { rememberName(m[1]); setFav('name', m[1]); }
+
+      for (i = 0; i < REMEMBER_RES.length; i++) {
+        if ((m = s.match(REMEMBER_RES[i]))) {
+          var prefix = s.slice(0, m.index);
+          // "do you remember me", "I can't remember", "if you remember" are questions, not facts to keep
+          if (!/\b(?:do|did|can|could|will|would|don'?t|didn'?t|can'?t|cannot|if|why|how|when|what|you|i|to|not|never)\s*$/i.test(prefix)) addFact(m[1].trim());
+          break;
+        }
+      }
+
+      if ((m = s.match(FAV_RE)) || (m = s.match(FAV_TL))) {
+        var k = FAV_KEY[m[1].toLowerCase()];
+        if (k) setFav(k, m[2]); else addFact('favorite ' + m[1].toLowerCase() + ' is ' + m[2].trim());
+      }
+      if ((m = s.match(BDAY_RE))) setFav('birthday', m[1]);
+      if ((m = s.match(BFF_RE)) && goodName(m[1])) setFav('bestFriend', m[1].charAt(0).toUpperCase() + m[1].slice(1));
+      if ((m = s.match(PET_RE))) addFact('has a ' + m[1] + (m[2] ? ' named ' + m[2] : ''));
+
+      for (i = 0; i < FOOD_RES.length; i++) {
+        if ((m = s.match(FOOD_RES[i]))) { logFood(m[1].replace(/\s+(?:today|this morning|tonight|already|kanina)$/i, '').trim()); break; }
+      }
+      for (i = 0; i < EVENT_RES.length; i++) {
+        if ((m = s.match(EVENT_RES[i]))) { logEvent(m[1].trim()); break; }
+      }
     });
   }
 
   // ---- context string fed to the AI through getCustomFacts() ----
+  var FAV_LABEL = { name: 'name', color: 'favorite color', animal: 'favorite animal', food: 'favorite food', toy: 'favorite toy',
+                    cartoon: 'favorite cartoon', song: 'favorite song', birthday: 'birthday', bestFriend: 'best friend' };
+  function favs() { try { return (window.BLIP && window.BLIP.getFavorites && window.BLIP.getFavorites()) || {}; } catch (e) { return {}; } }
+
   function getContextString() {
     var parts = [];
-    if (mem.name) parts.push("Your friend's name is " + mem.name + '.');
+    var f = favs();
+    var nm = mem.name || f.name;
+    if (nm) parts.push("Your friend's name is " + nm + '.');
+    var fl = Object.keys(FAV_LABEL).filter(function (k) { return k !== 'name' && f[k]; })
+      .map(function (k) { return FAV_LABEL[k] + ': ' + f[k]; });
+    if (fl.length) parts.push('Things you know about them: ' + fl.join('; ') + '.');
 
     var today = mem.daily[todayKey()];
     if (today && today.food.length) parts.push('Today they told you they ate: ' + today.food.join(', ') + '.');
@@ -5986,8 +6100,9 @@ body.theme-live #blip-face .eyes { visibility: hidden; }
 
     if (mem.facts.length) parts.push('Other things you remember about them: ' + mem.facts.slice(-10).join('; ') + '.');
 
-    if (!parts.length) return '';
-    return ' You also have a growing memory of your friend that gets a little richer every day, like a small child slowly learning about someone they love. Bring these up naturally and warmly when relevant, never as a list: ' + parts.join(' ');
+    var hint = ' When your friend clearly tells you something lasting about themselves (their name, a favorite thing, birthday, best friend, a pet, or something important), quietly call remember_about_friend so you keep it. Never save passing feelings, questions, or guesses.';
+    if (!parts.length) return hint;
+    return ' You also have a growing memory of your friend that gets a little richer every day, like a small child slowly learning about someone they love. Bring these up naturally and warmly when relevant, never as a list: ' + parts.join(' ') + hint;
   }
 
   // ---- bridge into the existing prompt channel, without editing it ----
@@ -6059,6 +6174,13 @@ body.theme-live #blip-face .eyes { visibility: hidden; }
     }
     html += '</div></div>';
 
+    var ff = favs(), fk = Object.keys(FAV_LABEL).filter(function (k) { return k !== 'name' && ff[k]; });
+    html += '<div class="mem-section"><div class="mem-label">Favorites</div><div class="mem-body">';
+    html += fk.length
+      ? fk.map(function (k) { return escapeHtml(FAV_LABEL[k] + ': ' + ff[k]); }).join('<br>')
+      : '<span class="mem-empty">Nothing yet</span>';
+    html += '</div></div>';
+
     html += '<div class="mem-section"><div class="mem-label">Other things remembered</div><div class="mem-body">';
     html += mem.facts.length
       ? mem.facts.slice(-15).reverse().map(escapeHtml).join('<br>')
@@ -6096,6 +6218,7 @@ body.theme-live #blip-face .eyes { visibility: hidden; }
       if (confirm("Forget everything BLIP has learned about your friend? This can't be undone.")) {
         forget();
         renderPanel();
+        setTimeout(function () { location.reload(); }, 150);   // also clears the favorites held in memory
       }
     });
   }
@@ -6115,6 +6238,39 @@ body.theme-live #blip-face .eyes { visibility: hidden; }
   window.BLIP.getGrowingMemory = getAll;
   window.BLIP.getGrowingMemoryContext = getContextString;
   window.BLIP.forgetGrowingMemory = forget;
+
+  // The voice AI can save things itself, which is far more accurate than guessing from sentences.
+  var REMEMBER_KINDS = { name: 1, favorite_color: 'color', favorite_animal: 'animal', favorite_food: 'food', favorite_toy: 'toy',
+                         favorite_cartoon: 'cartoon', favorite_song: 'song', birthday: 'birthday', best_friend: 'bestFriend' };
+  function toolRemember(args) {
+    var kind = String((args && args.kind) || '').toLowerCase().trim();
+    var val = String((args && args.value) || '').replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!kind || !val) return { status: 'not saved: need a kind and a value' };
+    if (kind === 'name') {
+      if (!goodName(val)) return { status: 'not saved: that does not look like a name' };
+      rememberName(val); setFav('name', mem.name); return { status: 'saved' };
+    }
+    if (kind === 'best_friend' && !goodName(val)) return { status: 'not saved: that does not look like a name' };
+    if (REMEMBER_KINDS[kind] && kind !== 'name') { return setFav(REMEMBER_KINDS[kind], val) ? { status: 'saved' } : { status: 'not saved' }; }
+    if (kind === 'ate_today') { if (!goodFood(val)) return { status: 'not saved: too vague' }; logFood(val); return { status: 'saved' }; }
+    if (kind === 'did_today') { if (!goodEvent(val)) return { status: 'not saved: too vague' }; logEvent(val); return { status: 'saved' }; }
+    if (!goodFact(val)) return { status: 'not saved: too vague' };
+    addFact(val); return { status: 'saved' };
+  }
+  var toolTimer = setInterval(function () {
+    if (window.BLIP && window.BLIP.registerTool) {
+      clearInterval(toolTimer);
+      window.BLIP.registerTool({
+        name: 'remember_about_friend',
+        description: 'Saves one lasting fact about the person you are talking with so you remember it next time: their name, a favorite thing, birthday, best friend, a pet, something important they told you, what they ate today, or something they did today. Call it quietly, without announcing it, whenever they clearly tell you one of these. Do not call it for passing feelings, small talk, questions, jokes, or anything you are unsure about.',
+        parameters: { type: 'OBJECT', properties: {
+          kind: { type: 'STRING', description: 'one of: name, favorite_color, favorite_animal, favorite_food, favorite_toy, favorite_cartoon, favorite_song, birthday, best_friend, fact, ate_today, did_today' },
+          value: { type: 'STRING', description: 'a short value in the friend\'s own words, e.g. Mark, blue, went to the park' } }, required: ['kind', 'value'] },
+        run: function (args) { return Promise.resolve(toolRemember(args)); }
+      });
+    }
+  }, 200);
+  setTimeout(function () { clearInterval(toolTimer); }, 15000);
 })();
 </script>
 
@@ -6381,11 +6537,32 @@ body.blip-asleep-blank #blip-zzz{display:none!important}
   var ROOM = 'blip-room-1';
   var gameState = null, gameContext = '', movingNow = false, gameRef = null;
   var firstSnap = true, lastToolStart = 0, lastEndKey = '', engineTried = false;
+  // A game only counts as "active" for a short while after the last move. After that BLIP is told nothing
+  // about it, so an old unfinished game left in the shared room never makes BLIP bring it up again.
+  var lastGameActivity = 0, GAME_IDLE_MS = 5 * 60 * 1000, END_FRESH_MS = 2 * 60 * 1000;
+  // Presence: the board page sends a heartbeat while it is open and connected, and the server removes it if the page closes.
+  var presenceVal = null, presenceSeen = false, serverOffset = 0;
+  function boardOnline() {
+    if (!presenceSeen) return true;                               // an older board page without heartbeats: fall back to the idle timer only
+    if (lastGameActivity > 0 && Date.now() - lastGameActivity < 60000) return true;   // a move just happened, so it is clearly open
+    return !!(presenceVal && presenceVal.ts && (Date.now() + serverOffset - presenceVal.ts) < 60000);
+  }
+  function idleMs() { return presenceSeen ? 2 * GAME_IDLE_MS : GAME_IDLE_MS; }
+  function within(ms) { return lastGameActivity > 0 && (Date.now() - lastGameActivity) < ms && boardOnline(); }
+  function gameActive() { return within(idleMs()); }
   var SQ_NAMES = ['top-left','top-middle','top-right','middle-left','center','middle-right','bottom-left','bottom-middle','bottom-right'];
 
   try {
     firebase.initializeApp(firebaseConfig);
     gameRef = firebase.database().ref('games/' + ROOM);
+    try {
+      var _db = firebase.database();
+      _db.ref('.info/serverTimeOffset').on('value', function (s) { serverOffset = Number(s.val()) || 0; });
+      _db.ref('games/' + ROOM + '-presence').on('value', function (s) {
+        presenceVal = s.val();
+        if (presenceVal) presenceSeen = true;
+      });
+    } catch (e) {}
   } catch (e) { return; } // no Firebase available - games stay silently off, nothing else breaks
 
   // ---------------- Chess engine: backup download if the first one failed ----------------
@@ -6409,6 +6586,7 @@ body.blip-asleep-blank #blip-zzz{display:none!important}
   // ---------------- Tell BLIP (out loud) what just happened on the board ----------------
   function liveOn() { var B = window.BLIP; return !!(B && B.isLiveConversationActive && B.isLiveConversationActive()); }
   function narrate(text) {
+    if (!gameActive()) return;   // nobody is playing right now: stay quiet
     var msg = '[GAME UPDATE from the board - this is not the player speaking] ' + text +
       ' React out loud in ONE short, natural sentence, in character. Do not call any function and do not read notation robotically.';
     try {
@@ -6420,7 +6598,10 @@ body.blip-asleep-blank #blip-zzz{display:none!important}
   }
 
   gameRef.on('value', function (snap) {
-    gameState = snap.val();
+    var incoming = snap.val();
+    // the very first snapshot is just whatever was left in the room from before, so it does not count as play
+    if (!firstSnap && JSON.stringify(incoming) !== JSON.stringify(gameState)) lastGameActivity = Date.now();
+    gameState = incoming;
     handleGameUpdate();
   });
 
@@ -6598,11 +6779,39 @@ body.blip-asleep-blank #blip-zzz{display:none!important}
           return Promise.resolve({ status: 'new tic-tac-toe game started on the board screen; you are O and the player (X) goes first' });
         }
       });
-      window.BLIP.getGameContext = function () { return gameContext; };
+      window.BLIP.getGameContext = function () {
+        if (!gameContext || !gameState) return '';
+        return within(gameState.status === 'playing' ? idleMs() : END_FRESH_MS) ? gameContext : '';
+      };
       clearInterval(regTimer);
     }
   }, 100);
   setTimeout(function () { clearInterval(regTimer); }, 8000);
+})();
+</script>
+
+<!-- PWA: service worker registration + install button (appears only when the browser allows install) -->
+<button id="blip-install-btn" type="button" hidden style="position:fixed;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:1000000;padding:10px 16px;border-radius:999px;border:1px solid rgba(255,255,255,.25);background:#5865f2;color:#fff;font:600 14px system-ui,sans-serif;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);">Install BLIP</button>
+<script>
+(function () {
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function (e) { console.warn('[BLIP] SW register failed', e); });
+    });
+  }
+  var deferred = null, btn = document.getElementById('blip-install-btn');
+  var standalone = (window.matchMedia && (matchMedia('(display-mode: standalone)').matches || matchMedia('(display-mode: fullscreen)').matches)) || navigator.standalone;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    deferred = e;
+    if (btn && !standalone) btn.hidden = false;
+  });
+  if (btn) btn.addEventListener('click', function () {
+    if (!deferred) return;
+    deferred.prompt();
+    deferred.userChoice.finally(function () { deferred = null; btn.hidden = true; });
+  });
+  window.addEventListener('appinstalled', function () { deferred = null; if (btn) btn.hidden = true; });
 })();
 </script>
 
